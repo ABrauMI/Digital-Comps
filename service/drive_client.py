@@ -29,18 +29,40 @@ class DriveClient:
         self.sheets = build_google_client("sheets", "v4", credentials=creds)
 
     def list_source_files(self, folder_id):
-        """Every Google Sheet directly inside the source folder."""
-        query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
-        files, page_token = [], None
+        """Every Google Sheet directly inside the source folder, including
+        shortcuts to sheets that live elsewhere (resolved to the real
+        target's id/modifiedTime, since that's what actually needs reading
+        and change-tracking -- a shortcut's own modifiedTime barely moves)."""
+        query = (
+            f"'{folder_id}' in parents and trashed=false and "
+            "(mimeType='application/vnd.google-apps.spreadsheet' "
+            "or mimeType='application/vnd.google-apps.shortcut')"
+        )
+        raw_files, page_token = [], None
         while True:
             resp = self.drive.files().list(
-                q=query, fields="nextPageToken, files(id, name, modifiedTime)", pageToken=page_token
+                q=query,
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime, shortcutDetails)",
+                pageToken=page_token,
             ).execute()
-            files.extend(resp.get("files", []))
+            raw_files.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
-        return files
+
+        resolved = []
+        for f in raw_files:
+            if f["mimeType"] == "application/vnd.google-apps.shortcut":
+                details = f.get("shortcutDetails", {})
+                if details.get("targetMimeType") != "application/vnd.google-apps.spreadsheet":
+                    continue  # shortcut to something that isn't a sheet
+                target = self.drive.files().get(
+                    fileId=details["targetId"], fields="id, name, modifiedTime"
+                ).execute()
+                resolved.append({"id": target["id"], "name": f["name"], "modifiedTime": target["modifiedTime"]})
+            else:
+                resolved.append({"id": f["id"], "name": f["name"], "modifiedTime": f["modifiedTime"]})
+        return resolved
 
     def get_file_name(self, file_id):
         return self.drive.files().get(fileId=file_id, fields="name").execute()["name"]
