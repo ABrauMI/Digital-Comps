@@ -56,13 +56,17 @@ class DriveClient:
         creative_rows, spend_rows = [], []
         for sheet in meta["sheets"]:
             title = sheet["properties"]["title"]
+            # A1-notation ranges need a sheet title with spaces/special chars
+            # single-quoted, or the API silently returns no values instead of
+            # erroring.
+            quoted_title = "'" + title.replace("'", "''") + "'"
             result = self.sheets.spreadsheets().values().get(
-                spreadsheetId=file_id, range=title
+                spreadsheetId=file_id, range=quoted_title
             ).execute()
             values = result.get("values", [])
             if not values:
                 continue
-            header = values[0]
+            header = [h.strip().lower() for h in values[0]]
             records = []
             for row in values[1:]:
                 padded = row + [""] * (len(header) - len(row))
