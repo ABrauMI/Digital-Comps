@@ -89,6 +89,10 @@ class DriveClient:
             if not values:
                 continue
             header = [h.strip().lower() for h in values[0]]
+            # some exports (e.g. multi-race rollup sheets) use "platform"
+            # where single-race sheets use "source_platform" -- normalize so
+            # every downstream row has the same key regardless of source.
+            header = ["source_platform" if h == "platform" else h for h in header]
             records = []
             for row in values[1:]:
                 padded = row + [""] * (len(header) - len(row))
