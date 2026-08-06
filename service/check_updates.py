@@ -1,7 +1,10 @@
-"""Run on a schedule (e.g. hourly, via Railway's Cron Job): checks every
-source sheet in the Drive folder, regenerates and posts to Slack any
-report whose source data changed since the last run."""
+"""Run on a schedule (e.g. 8am/3pm ET, via Railway's Cron Job): checks
+every source sheet in the Drive folder, and for any whose data changed,
+posts one "Comp Drop" summary message with each updated report attached
+as a threaded reply underneath it (rather than one message per file)."""
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from slack_sdk import WebClient
 
@@ -19,19 +22,14 @@ def main():
     state = load_state()
 
     files = drive.list_source_files(FOLDER_ID)
-    changed, skipped, failed = 0, 0, 0
+    updated, skipped, failed = [], 0, 0
+
     for f in files:
         if state.get(f["id"]) == f["modifiedTime"]:
             continue
         print(f"Change detected: {f['name']}")
         try:
             xlsx_path, title = generate_report(drive, f["id"], f["name"])
-            slack.files_upload_v2(
-                channel=CHANNEL,
-                file=xlsx_path,
-                title=f"{title} Digital Competitive Report",
-                initial_comment=f"Updated comp for *{title}* — source data changed.",
-            )
         except NoDataError as e:
             print(f"Skipping {f['name']}: {e}")
             skipped += 1
@@ -41,15 +39,34 @@ def main():
             save_state(state)
             continue
         except Exception as e:
-            print(f"ERROR generating/posting {f['name']}: {e}")
+            print(f"ERROR generating {f['name']}: {e}")
             failed += 1
             continue  # leave state alone so this file gets retried next run
+        updated.append({"file_id": f["id"], "modifiedTime": f["modifiedTime"], "title": title, "xlsx_path": xlsx_path})
 
-        state[f["id"]] = f["modifiedTime"]
-        save_state(state)
-        changed += 1
+    if updated:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        label = now_et.strftime("Comp Drop %m/%d/%y %-I%p").replace("AM", "am").replace("PM", "pm")
+        summary = f"*{label}*\n" + "\n".join(f"• {u['title']}" for u in updated)
+        parent = slack.chat_postMessage(channel=CHANNEL, text=summary)
+        thread_ts = parent["ts"]
 
-    print(f"Checked {len(files)} source file(s): {changed} updated, {skipped} skipped (no data), {failed} failed.")
+        for u in updated:
+            try:
+                slack.files_upload_v2(
+                    channel=CHANNEL,
+                    thread_ts=thread_ts,
+                    file=u["xlsx_path"],
+                    title=f"{u['title']} Digital Competitive Report",
+                )
+            except Exception as e:
+                print(f"ERROR posting {u['title']}: {e}")
+                failed += 1
+                continue
+            state[u["file_id"]] = u["modifiedTime"]
+            save_state(state)
+
+    print(f"Checked {len(files)} source file(s): {len(updated)} updated, {skipped} skipped (no data), {failed} failed.")
 
 
 if __name__ == "__main__":
