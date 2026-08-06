@@ -6,7 +6,7 @@ import os
 from slack_sdk import WebClient
 
 from drive_client import DriveClient
-from pipeline import generate_report
+from pipeline import generate_report, NoDataError
 from state_store import load_state, save_state
 
 FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
@@ -19,23 +19,37 @@ def main():
     state = load_state()
 
     files = drive.list_source_files(FOLDER_ID)
-    changed = 0
+    changed, skipped, failed = 0, 0, 0
     for f in files:
         if state.get(f["id"]) == f["modifiedTime"]:
             continue
         print(f"Change detected: {f['name']}")
-        xlsx_path, title = generate_report(drive, f["id"], f["name"])
-        slack.files_upload_v2(
-            channel=CHANNEL,
-            file=xlsx_path,
-            title=f"{title} Digital Competitive Report",
-            initial_comment=f"Updated comp for *{title}* — source data changed.",
-        )
+        try:
+            xlsx_path, title = generate_report(drive, f["id"], f["name"])
+            slack.files_upload_v2(
+                channel=CHANNEL,
+                file=xlsx_path,
+                title=f"{title} Digital Competitive Report",
+                initial_comment=f"Updated comp for *{title}* — source data changed.",
+            )
+        except NoDataError as e:
+            print(f"Skipping {f['name']}: {e}")
+            skipped += 1
+            # remember its modifiedTime so an unchanged-but-still-empty sheet
+            # doesn't get re-attempted every run
+            state[f["id"]] = f["modifiedTime"]
+            save_state(state)
+            continue
+        except Exception as e:
+            print(f"ERROR generating/posting {f['name']}: {e}")
+            failed += 1
+            continue  # leave state alone so this file gets retried next run
+
         state[f["id"]] = f["modifiedTime"]
+        save_state(state)
         changed += 1
 
-    save_state(state)
-    print(f"Checked {len(files)} source file(s), {changed} updated.")
+    print(f"Checked {len(files)} source file(s): {changed} updated, {skipped} skipped (no data), {failed} failed.")
 
 
 if __name__ == "__main__":

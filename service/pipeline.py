@@ -12,6 +12,11 @@ from scripts.build_report import build  # noqa: E402
 REQUIRED_SPEND_FIELDS = ["spend", "sentiment", "language", "updated_at"]
 
 
+class NoDataError(ValueError):
+    """Raised when a source sheet has no usable rows yet (e.g. a race with
+    no tracked ad spend so far) -- expected and skippable, not a crash."""
+
+
 def derive_title(file_name):
     title = re.sub(r"raw\s*data", "", file_name, flags=re.IGNORECASE).strip()
     return title or file_name
@@ -59,6 +64,9 @@ def generate_report(drive_client, file_id, file_name=None):
     creative_rows, spend_rows = drive_client.fetch_sheet_data(file_id)
     creative_clean = _clean_creative_rows(creative_rows)
     spend_clean = _clean_spend_rows(spend_rows)
+
+    if not creative_clean and not spend_clean:
+        raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
 
     title = derive_title(file_name)
     include_dvr = _has_two_party_race(spend_clean)
