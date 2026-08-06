@@ -22,6 +22,15 @@ def _load_credentials():
     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
 
+def _excluded_names():
+    """Source files to skip entirely, by case-insensitive name substring --
+    e.g. multi-race rollup sheets whose numbers don't match the standalone
+    per-race sheets (see "Anchor Raw Data"). Configured via
+    EXCLUDED_SOURCE_NAMES, comma-separated."""
+    raw = os.environ.get("EXCLUDED_SOURCE_NAMES", "")
+    return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+
 class DriveClient:
     def __init__(self):
         creds = _load_credentials()
@@ -49,6 +58,9 @@ class DriveClient:
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
+
+        excluded = _excluded_names()
+        raw_files = [f for f in raw_files if not any(n in f["name"].lower() for n in excluded)]
 
         resolved = []
         for f in raw_files:
