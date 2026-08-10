@@ -49,6 +49,18 @@ def _clean_spend_rows(rows):
     return cleaned
 
 
+def latest_updated_at(spend_rows):
+    """Newest updated_at timestamp among a sheet's (raw, uncleaned) daily-
+    spend rows, or None if there's nothing to compare yet. These are plain
+    "YYYY-MM-DD HH:MM:SS" strings, which sort correctly as-is. This -- not
+    Drive's own modifiedTime -- is the change-detection signal: sheets fed
+    by an IMPORTRANGE-style formula pull don't reliably bump modifiedTime
+    when the source data refreshes, but Ad Hawk does stamp each row with
+    when it was actually written."""
+    stamps = [r["updated_at"] for r in spend_rows if r.get("updated_at")]
+    return max(stamps) if stamps else None
+
+
 def _has_two_party_race(spend_rows):
     party_total = {}
     for r in spend_rows:
