@@ -8,6 +8,7 @@ Drive's file-level modifiedTime -- sheets fed by an IMPORTRANGE-style
 formula pull recalculate without registering as a "modification" in
 Drive's revision history, so modifiedTime alone misses real updates."""
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,9 @@ from state_store import load_state, save_state
 
 FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
 CHANNEL = os.environ["SLACK_DEFAULT_CHANNEL"]
+# Spread requests out to stay well under Sheets' per-minute read quota
+# rather than firing every file's read back-to-back.
+PAUSE_BETWEEN_FILES_SECONDS = 1.5
 
 
 def main():
@@ -30,8 +34,9 @@ def main():
     updated, skipped, failed = [], 0, 0
 
     for f in files:
+        time.sleep(PAUSE_BETWEEN_FILES_SECONDS)
         try:
-            _, spend_rows = drive.fetch_sheet_data(f["id"])
+            creative_rows, spend_rows = drive.fetch_sheet_data(f["id"])
         except Exception as e:
             print(f"ERROR reading {f['name']}: {e}")
             failed += 1
@@ -43,7 +48,9 @@ def main():
 
         print(f"Change detected: {f['name']} (updated_at {latest})")
         try:
-            xlsx_path, title = generate_report(drive, f["id"], f["name"])
+            xlsx_path, title = generate_report(
+                drive, f["id"], f["name"], creative_rows=creative_rows, spend_rows=spend_rows
+            )
         except NoDataError as e:
             print(f"Skipping {f['name']}: {e}")
             skipped += 1

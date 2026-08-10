@@ -68,12 +68,16 @@ def _has_two_party_race(spend_rows):
     return party_total.get("D", 0) > 0 and party_total.get("R", 0) > 0
 
 
-def generate_report(drive_client, file_id, file_name=None):
-    """Pulls the sheet, builds the report, returns (xlsx_path, title)."""
+def generate_report(drive_client, file_id, file_name=None, creative_rows=None, spend_rows=None):
+    """Pulls the sheet (unless rows are already provided -- e.g. the caller
+    just read them to check updated_at, no need to fetch twice), builds the
+    report, returns (xlsx_path, title)."""
     if file_name is None:
         file_name = drive_client.get_file_name(file_id)
 
-    creative_rows, spend_rows = drive_client.fetch_sheet_data(file_id)
+    if creative_rows is None and spend_rows is None:
+        creative_rows, spend_rows = drive_client.fetch_sheet_data(file_id)
+
     creative_clean = _clean_creative_rows(creative_rows)
     spend_clean = _clean_spend_rows(spend_rows)
 

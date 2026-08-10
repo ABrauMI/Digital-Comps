@@ -1,14 +1,17 @@
 """Google Drive + Sheets access for the Ad Hawk source folder.
 
-Reads sheet data straight through the Sheets API (values.get), so there's
-no markdown-table parsing involved -- each row comes back as a clean dict
-keyed by its header row.
+Reads sheet data straight through the Sheets API (values.batchGet), so
+there's no markdown-table parsing involved -- each row comes back as a
+clean dict keyed by its header row.
 """
 import json
 import os
+import random
+import time
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build as build_google_client
+from googleapiclient.errors import HttpError
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -31,6 +34,20 @@ def _excluded_names():
     return [n.strip().lower() for n in raw.split(",") if n.strip()]
 
 
+def _retry(request, max_attempts=5, base_delay=2.0):
+    """Execute a googleapiclient request, retrying with exponential backoff
+    on HTTP 429 (rate limit). Drive/Sheets quotas are per-minute, so a
+    short wait and retry recovers cleanly instead of failing the file."""
+    for attempt in range(max_attempts):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status == 429 and attempt < max_attempts - 1:
+                time.sleep(base_delay * (2 ** attempt) + random.uniform(0, 1))
+                continue
+            raise
+
+
 class DriveClient:
     def __init__(self):
         creds = _load_credentials()
@@ -40,8 +57,7 @@ class DriveClient:
     def list_source_files(self, folder_id):
         """Every Google Sheet directly inside the source folder, including
         shortcuts to sheets that live elsewhere (resolved to the real
-        target's id/modifiedTime, since that's what actually needs reading
-        and change-tracking -- a shortcut's own modifiedTime barely moves)."""
+        target's id, since that's what actually needs reading)."""
         query = (
             f"'{folder_id}' in parents and trashed=false and "
             "(mimeType='application/vnd.google-apps.spreadsheet' "
@@ -49,11 +65,11 @@ class DriveClient:
         )
         raw_files, page_token = [], None
         while True:
-            resp = self.drive.files().list(
+            resp = _retry(self.drive.files().list(
                 q=query,
                 fields="nextPageToken, files(id, name, mimeType, modifiedTime, shortcutDetails)",
                 pageToken=page_token,
-            ).execute()
+            ))
             raw_files.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -68,36 +84,41 @@ class DriveClient:
                 details = f.get("shortcutDetails", {})
                 if details.get("targetMimeType") != "application/vnd.google-apps.spreadsheet":
                     continue  # shortcut to something that isn't a sheet
-                target = self.drive.files().get(
+                target = _retry(self.drive.files().get(
                     fileId=details["targetId"], fields="id, name, modifiedTime"
-                ).execute()
+                ))
                 resolved.append({"id": target["id"], "name": f["name"], "modifiedTime": target["modifiedTime"]})
             else:
                 resolved.append({"id": f["id"], "name": f["name"], "modifiedTime": f["modifiedTime"]})
         return resolved
 
     def get_file_name(self, file_id):
-        return self.drive.files().get(fileId=file_id, fields="name").execute()["name"]
+        return _retry(self.drive.files().get(fileId=file_id, fields="name"))["name"]
 
     def get_modified_time(self, file_id):
-        return self.drive.files().get(fileId=file_id, fields="modifiedTime").execute()["modifiedTime"]
+        return _retry(self.drive.files().get(fileId=file_id, fields="modifiedTime"))["modifiedTime"]
 
     def fetch_sheet_data(self, file_id):
         """Returns (creative_rows, spend_rows) as lists of dicts, detected by
         header shape rather than by tab name (Ad Hawk's tab names aren't
-        guaranteed consistent across races)."""
-        meta = self.sheets.spreadsheets().get(spreadsheetId=file_id).execute()
+        guaranteed consistent across races). Uses a single batchGet for all
+        tabs' values instead of one values.get call per tab, since each
+        source file is now read on every scheduled check rather than only
+        when Drive's own modifiedTime changes -- fewer requests per file
+        matters a lot more than it used to."""
+        meta = _retry(self.sheets.spreadsheets().get(spreadsheetId=file_id))
+        titles = [s["properties"]["title"] for s in meta["sheets"]]
+        # A1-notation ranges need a sheet title with spaces/special chars
+        # single-quoted, or the API silently returns no values instead of
+        # erroring.
+        quoted_titles = ["'" + t.replace("'", "''") + "'" for t in titles]
+        result = _retry(self.sheets.spreadsheets().values().batchGet(
+            spreadsheetId=file_id, ranges=quoted_titles
+        ))
+
         creative_rows, spend_rows = [], []
-        for sheet in meta["sheets"]:
-            title = sheet["properties"]["title"]
-            # A1-notation ranges need a sheet title with spaces/special chars
-            # single-quoted, or the API silently returns no values instead of
-            # erroring.
-            quoted_title = "'" + title.replace("'", "''") + "'"
-            result = self.sheets.spreadsheets().values().get(
-                spreadsheetId=file_id, range=quoted_title
-            ).execute()
-            values = result.get("values", [])
+        for value_range in result.get("valueRanges", []):
+            values = value_range.get("values", [])
             if not values:
                 continue
             header = [h.strip().lower() for h in values[0]]
