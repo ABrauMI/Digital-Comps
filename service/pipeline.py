@@ -68,6 +68,34 @@ def _has_two_party_race(spend_rows):
     return party_total.get("D", 0) > 0 and party_total.get("R", 0) > 0
 
 
+def _date_floors():
+    """Per-race data cutoffs, e.g. a client only wanting to see spend after
+    a contested primary resolved. Configured via RACE_DATE_FLOORS as
+    comma-separated 'name substring:YYYY-MM-DD' pairs, e.g.
+    'MT-01:2026-06-11'. Matching is a case-insensitive substring against
+    the source file's name."""
+    raw = os.environ.get("RACE_DATE_FLOORS", "")
+    floors = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        name, date_str = part.rsplit(":", 1)
+        try:
+            floors.append((name.strip().lower(), date_str.strip()))
+        except ValueError:
+            continue
+    return floors
+
+
+def _date_floor_for(file_name):
+    name_lower = file_name.lower()
+    for substr, floor_str in _date_floors():
+        if substr in name_lower:
+            return floor_str
+    return None
+
+
 def generate_report(drive_client, file_id, file_name=None, creative_rows=None, spend_rows=None):
     """Pulls the sheet (unless rows are already provided -- e.g. the caller
     just read them to check updated_at, no need to fetch twice), builds the
@@ -80,6 +108,11 @@ def generate_report(drive_client, file_id, file_name=None, creative_rows=None, s
 
     creative_clean = _clean_creative_rows(creative_rows)
     spend_clean = _clean_spend_rows(spend_rows)
+
+    floor_str = _date_floor_for(file_name)
+    if floor_str:
+        creative_clean = [r for r in creative_clean if r["first_ran"] >= floor_str]
+        spend_clean = [r for r in spend_clean if r["target_date"] >= floor_str]
 
     if not creative_clean and not spend_clean:
         raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
