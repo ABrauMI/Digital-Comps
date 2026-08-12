@@ -96,6 +96,38 @@ def _date_floor_for(file_name):
     return None
 
 
+def _race_excluded_advertisers():
+    """Per-race advertiser exclusions -- e.g. keeping a generic
+    institutional advertiser out of one race's report without hiding it
+    everywhere. Configured via RACE_EXCLUDED_ADVERTISERS as comma-separated
+    'race substring:advertiser1|advertiser2' groups, e.g.
+    'MT-01:MT WAY|MT SECRETARY OF STATE, PA-GOV:SOME PAC'. Race matching is
+    a case-insensitive substring against the source file's name; advertiser
+    matching is an exact (case-insensitive) match against the advertiser
+    column, not a substring -- so excluding one committee doesn't
+    accidentally also swallow a similarly-named one."""
+    raw = os.environ.get("RACE_EXCLUDED_ADVERTISERS", "")
+    rules = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        race_substr, advertisers = part.split(":", 1)
+        names = {a.strip().lower() for a in advertisers.split("|") if a.strip()}
+        if names:
+            rules.append((race_substr.strip().lower(), names))
+    return rules
+
+
+def _excluded_advertisers_for(file_name):
+    name_lower = file_name.lower()
+    excluded = set()
+    for race_substr, advertiser_names in _race_excluded_advertisers():
+        if race_substr in name_lower:
+            excluded |= advertiser_names
+    return excluded
+
+
 def generate_report(drive_client, file_id, file_name=None, creative_rows=None, spend_rows=None):
     """Pulls the sheet (unless rows are already provided -- e.g. the caller
     just read them to check updated_at, no need to fetch twice), builds the
@@ -113,6 +145,11 @@ def generate_report(drive_client, file_id, file_name=None, creative_rows=None, s
     if floor_str:
         creative_clean = [r for r in creative_clean if r["first_ran"] >= floor_str]
         spend_clean = [r for r in spend_clean if r["target_date"] >= floor_str]
+
+    excluded_advs = _excluded_advertisers_for(file_name)
+    if excluded_advs:
+        creative_clean = [r for r in creative_clean if r["advertiser"].strip().lower() not in excluded_advs]
+        spend_clean = [r for r in spend_clean if r["advertiser"].strip().lower() not in excluded_advs]
 
     if not creative_clean and not spend_clean:
         raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
