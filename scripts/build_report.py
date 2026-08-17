@@ -10,6 +10,11 @@ Expects DIR to contain two files produced by parsing the Ad Hawk Google Sheet
 
 --dvr-tab adds a Democrat vs. Republican summary tab; only meaningful for a
 two-party general election (skip it for primaries or nonpartisan races).
+
+The tab-builder functions below (add_competitive_report_tab,
+add_creative_timeline_tab, add_dvr_tab) are reused as-is by
+build_multi_district_report.py to assemble one workbook covering many
+races (one race's worth of rows in, one styled tab out, every time).
 """
 import argparse
 import json
@@ -62,6 +67,22 @@ BODY_FONT  = 'Figtree'
 MONEY = '$#,##0;-$#,##0;""'
 MONEY_TOT = '$#,##0'
 
+hdr_font    = Font(name=BODY_FONT, size=9, bold=True, color='FFFFFF')
+hdr_fill    = PatternFill('solid', fgColor=NAVY)
+title_font  = Font(name=TITLE_FONT, size=14, bold=True, color='FFFFFF')
+note_font   = Font(name=BODY_FONT, size=8, italic=True, color=GREY_TXT)
+footer_font = Font(name=BODY_FONT, size=8, italic=True, color=FOOTER_GREY)
+cell_font   = Font(name=BODY_FONT, size=9, color=NAVY)
+adv_font    = Font(name=BODY_FONT, size=9, bold=True, color=NAVY)
+tot_font    = Font(name=BODY_FONT, size=9, bold=True, color=NAVY)
+party_tot_font = Font(name=BODY_FONT, size=10, bold=True, color='FFFFFF')
+grand_tot_font = Font(name=BODY_FONT, size=10, bold=True, color='FFFFFF')
+
+BORDER_TOTAL = Border(top=Side(style='medium', color=NAVY), bottom=Side(style='medium', color=NAVY))
+BORDER_GRAND = Border(top=Side(style='thick', color=NAVY), bottom=Side(style='double', color=NAVY))
+BORDER_LIVE = Border(top=Side(style='thin', color=NAVY), bottom=Side(style='thin', color=NAVY),
+                      left=Side(style='thin', color=NAVY), right=Side(style='thin', color=NAVY))
+
 
 def tint(hex_color, amount):
     r = int(hex_color[0:2], 16); g = int(hex_color[2:4], 16); b = int(hex_color[4:6], 16)
@@ -80,6 +101,18 @@ def party_colors(party):
 def week_start_of(d):
     """Monday-of-week shifted to a Tuesday-start convention."""
     return d - datetime.timedelta(days=(d.weekday() - 1) % 7)
+
+
+def weeks_covering(dates, today):
+    """Every Tuesday-start week from the earliest date given through today."""
+    min_week_start = week_start_of(min(dates))
+    this_week_start = week_start_of(today)
+    weeks = []
+    w = min_week_start
+    while w <= this_week_start:
+        weeks.append(w)
+        w += datetime.timedelta(days=7)
+    return weeks
 
 
 def style_row(ws, row, ncols, font=None, fill=None, border=None, start=1):
@@ -104,39 +137,21 @@ def add_logo(ws, height_px=26):
     ws.add_image(img)
 
 
-def add_footer(ws, row, ncols, footer_font):
+def add_footer(ws, row, ncols):
     ws.cell(row=row, column=1, value="Report prepared by GPS Impact  |  Confidential").font = footer_font
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
 
 
-def build(data_dir, title, output_path, today, include_dvr_tab):
-    rows1 = json.load(open(os.path.join(data_dir, "raw_creative_clean.json")))
-    rows2 = json.load(open(os.path.join(data_dir, "daily_spend_clean.json")))
-
-    for r in rows1:
-        r['spend'] = float(r['spend'])
-        r['first_ran'] = datetime.date.fromisoformat(r['first_ran'])
-        r['last_ran'] = datetime.date.fromisoformat(r['last_ran'])
-    for r in rows2:
-        r['spend'] = float(r['spend'])
-        r['target_date'] = datetime.date.fromisoformat(r['target_date'])
-
-    all_dates = [r['target_date'] for r in rows2] + [r['first_ran'] for r in rows1] + [r['last_ran'] for r in rows1]
-    min_week_start = week_start_of(min(all_dates))
-    this_week_start = week_start_of(today)
-    weeks = []
-    w = min_week_start
-    while w <= this_week_start:
-        weeks.append(w)
-        w += datetime.timedelta(days=7)
-
+def _advertiser_order(rows2):
+    """Party blocks ordered by total party spend desc; within each party,
+    advertisers ordered by spend desc. Shared by every tab so the same
+    race always lists advertisers in the same order."""
     adv_party = {}
     adv_total = defaultdict(float)
     for r in rows2:
         adv_party[r['advertiser']] = r['party']
         adv_total[r['advertiser']] += r['spend']
 
-    # order: party blocks by total party spend desc: within each party, advertisers by spend desc
     party_total_spend = defaultdict(float)
     for adv, tot in adv_total.items():
         party_total_spend[adv_party[adv]] += tot
@@ -145,6 +160,15 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
     advertisers_ordered = []
     for party in parties_ordered:
         advertisers_ordered.extend([a for a in advertisers_by_spend if adv_party[a] == party])
+    return advertisers_ordered, adv_party, adv_total, party_total_spend
+
+
+def add_competitive_report_tab(wb, sheet_name, banner_title, weeks, rows2):
+    """One race's spend rows -> one styled "Competitive Digital Report"-
+    shaped tab (candidate/committee -> party -> platform -> weekly spend),
+    added to workbook wb. Returns per-race stats a Summary tab needs:
+    {platform: {'total':, 'GOP':, 'DEM':}}, plus the race's grand total."""
+    advertisers_ordered, adv_party, adv_total, party_total_spend = _advertiser_order(rows2)
 
     weekly = defaultdict(lambda: defaultdict(float))
     platforms_by_adv = defaultdict(set)
@@ -153,39 +177,17 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
         weekly[(r['advertiser'], r['source_platform'])][wk] += r['spend']
         platforms_by_adv[r['advertiser']].add(r['source_platform'])
 
-    hdr_font    = Font(name=BODY_FONT, size=9, bold=True, color='FFFFFF')
-    hdr_fill    = PatternFill('solid', fgColor=NAVY)
-    title_font  = Font(name=TITLE_FONT, size=14, bold=True, color='FFFFFF')
-    note_font   = Font(name=BODY_FONT, size=8, italic=True, color=GREY_TXT)
-    footer_font = Font(name=BODY_FONT, size=8, italic=True, color=FOOTER_GREY)
-    cell_font   = Font(name=BODY_FONT, size=9, color=NAVY)
-    adv_font    = Font(name=BODY_FONT, size=9, bold=True, color=NAVY)
-    tot_font    = Font(name=BODY_FONT, size=9, bold=True, color=NAVY)
-    party_tot_font = Font(name=BODY_FONT, size=10, bold=True, color='FFFFFF')
-    grand_tot_font = Font(name=BODY_FONT, size=10, bold=True, color='FFFFFF')
-
-    BORDER_TOTAL = Border(top=Side(style='medium', color=NAVY), bottom=Side(style='medium', color=NAVY))
-    BORDER_GRAND = Border(top=Side(style='thick', color=NAVY), bottom=Side(style='double', color=NAVY))
-    BORDER_LIVE = Border(top=Side(style='thin', color=NAVY), bottom=Side(style='thin', color=NAVY),
-                          left=Side(style='thin', color=NAVY), right=Side(style='thin', color=NAVY))
-
-    wb = Workbook()
-
-    # =====================================================================
-    # TAB 1: Competitive Digital Report
-    # =====================================================================
-    ws = wb.active
-    ws.title = "Competitive Digital Report"
+    ws = wb.create_sheet(sheet_name)
     ws.sheet_view.showGridLines = False
 
     HEADERS = ["CANDIDATE / COMMITTEE", "PARTY", "PLATFORM", "TOTAL SPEND"] + [wk.strftime("%m/%d/%Y") for wk in weeks]
     ncols = len(HEADERS)
-    WK_COL0 = 5  # first weekly column
+    WK_COL0 = 5
 
     ws.row_dimensions[1].height = BANNER_ROW1_PT
     ws.row_dimensions[2].height = BANNER_ROW2_PT
     ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=4)
-    tcell = ws.cell(row=1, column=1, value=f"   {title}")
+    tcell = ws.cell(row=1, column=1, value=f"   {banner_title}")
     tcell.font = title_font
     tcell.alignment = Alignment(horizontal='right', vertical='center')
     ws.merge_cells(start_row=1, start_column=WK_COL0, end_row=1, end_column=ncols)
@@ -201,7 +203,7 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
 
     r = 4
 
-    def flush_party_total(ws, party, r, ncols):
+    def flush_party_total(party, r):
         light, midt, candt, solid = party_colors(party)
         solid_fill = PatternFill('solid', fgColor=solid)
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
@@ -218,7 +220,7 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
     for adv in advertisers_ordered:
         party = adv_party.get(adv, '')
         if prev_party is not None and party != prev_party:
-            r = flush_party_total(ws, prev_party, r, ncols)
+            r = flush_party_total(prev_party, r)
         prev_party = party
 
         light, midt, candt, solid = party_colors(party)
@@ -258,7 +260,8 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
 
         r += 1
 
-    r = flush_party_total(ws, prev_party, r, ncols)
+    if prev_party is not None:
+        r = flush_party_total(prev_party, r)
 
     grand_fill = PatternFill('solid', fgColor=NAVY)
     ws.cell(row=r, column=1, value="GRAND TOTAL")
@@ -269,7 +272,7 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
         ws.cell(row=r, column=ci, value=v).number_format = MONEY_TOT
     style_row(ws, r, ncols, font=grand_tot_font, fill=grand_fill, border=BORDER_GRAND)
     r += 2
-    add_footer(ws, r, ncols, footer_font)
+    add_footer(ws, r, ncols)
 
     ws.column_dimensions['A'].width = 34
     ws.column_dimensions['B'].width = 8
@@ -280,10 +283,24 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
     ws.freeze_panes = get_column_letter(WK_COL0) + "4"
     ws.row_dimensions[3].height = 30
 
-    # =====================================================================
-    # TAB 2: Creative Timeline
-    # =====================================================================
-    ws2 = wb.create_sheet("Creative Timeline")
+    # per-platform GOP/DEM/total, for a Summary tab rolling up many races
+    platform_stats = defaultdict(lambda: {'total': 0.0, 'GOP': 0.0, 'DEM': 0.0})
+    for r_ in rows2:
+        stats = platform_stats[r_['source_platform']]
+        stats['total'] += r_['spend']
+        if r_['party'] == 'R':
+            stats['GOP'] += r_['spend']
+        elif r_['party'] == 'D':
+            stats['DEM'] += r_['spend']
+    return platform_stats
+
+
+def add_creative_timeline_tab(wb, sheet_name, weeks, rows1, rows2_for_order=None):
+    """One race's creative rows -> one styled "Creative Timeline" tab
+    (weekly Gantt-style flight shading), added to workbook wb."""
+    advertisers_ordered, adv_party, _, _ = _advertiser_order(rows2_for_order if rows2_for_order is not None else rows1)
+
+    ws2 = wb.create_sheet(sheet_name)
     ws2.sheet_view.showGridLines = False
     CT_HEADERS = ["CANDIDATE / COMMITTEE", "CREATIVE", "PLATFORM", "PARTY", "PURPOSE", "TONE",
                   "TOPIC", "TOTAL SPEND", "FIRST RAN", "LAST RAN", "AD LIBRARY LINK"]
@@ -316,12 +333,17 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
     for cre in rows1:
         creatives_by_adv[cre['advertiser']].append(cre)
 
+    # advertisers that only appear in creative rows, not in the spend-based
+    # ordering (e.g. a committee with creatives logged but $0 spend so far)
+    extra_advs = [a for a in creatives_by_adv if a not in adv_party]
+    order = advertisers_ordered + sorted(extra_advs)
+
     r = 4
-    for adv in advertisers_ordered:
+    for adv in order:
         creas = sorted(creatives_by_adv.get(adv, []), key=lambda c: c['first_ran'])
         if not creas:
             continue
-        party = adv_party.get(adv, '')
+        party = adv_party.get(adv) or creas[0].get('party', '')
         light, midt, candt, solid = party_colors(party)
         light_fill = PatternFill('solid', fgColor=light)
         mid_fill = PatternFill('solid', fgColor=midt)
@@ -361,7 +383,7 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
             ws2.cell(row=rr, column=1).fill = light_fill
         r += 1
 
-    add_footer(ws2, r + 1, ncols2, footer_font)
+    add_footer(ws2, r + 1, ncols2)
 
     ws2.column_dimensions['A'].width = 24
     ws2.column_dimensions['B'].width = 45
@@ -379,92 +401,124 @@ def build(data_dir, title, output_path, today, include_dvr_tab):
     ws2.freeze_panes = get_column_letter(len(CT_HEADERS) + 1) + "4"
     ws2.row_dimensions[3].height = 30
 
-    # =====================================================================
-    # TAB 3 (optional): D vs R
-    # =====================================================================
+
+def add_dvr_tab(wb, weeks, rows2, party_total_spend):
+    ws3 = wb.create_sheet("D vs R")
+    ws3.sheet_view.showGridLines = False
+    ws3.row_dimensions[1].height = BANNER_ROW1_PT
+    ws3.row_dimensions[2].height = BANNER_ROW2_PT
+    ncols3 = 4  # WEEK, DEMOCRAT, REPUBLICAN, DELTA
+
+    ws3.merge_cells(start_row=1, start_column=1, end_row=2, end_column=ncols3)
+    tcell3 = ws3.cell(row=1, column=1, value="  D VS R")
+    tcell3.font = title_font
+    tcell3.alignment = Alignment(horizontal='right', vertical='center')
+    style_row(ws3, 1, ncols3, fill=hdr_fill)
+    style_row(ws3, 2, ncols3, fill=hdr_fill)
+    add_logo(ws3)
+
+    advertisers_ordered, adv_party, _, _ = _advertiser_order(rows2)
+    weekly = defaultdict(lambda: defaultdict(float))
+    platforms_by_adv = defaultdict(set)
+    for r_ in rows2:
+        wk = week_start_of(r_['target_date'])
+        weekly[(r_['advertiser'], r_['source_platform'])][wk] += r_['spend']
+        platforms_by_adv[r_['advertiser']].add(r_['source_platform'])
+
+    dem_weekly = defaultdict(float)
+    rep_weekly = defaultdict(float)
+    for a in advertisers_ordered:
+        p = adv_party.get(a, '')
+        if p not in ('D', 'R'):
+            continue
+        target = dem_weekly if p == 'D' else rep_weekly
+        for plat in platforms_by_adv[a]:
+            for wk, v in weekly[(a, plat)].items():
+                target[wk] += v
+
+    dem_total = sum(dem_weekly.values())
+    rep_total = sum(rep_weekly.values())
+    np_total = party_total_spend.get('NP', 0.0)
+    delta_total = dem_total - rep_total
+    dem_solid, rep_solid = PARTY_SOLID['D'], PARTY_SOLID['R']
+
+    r3 = 4
+    ws3.cell(row=r3, column=1, value="DEMOCRAT TOTAL SPEND")
+    ws3.cell(row=r3, column=2, value=dem_total).number_format = MONEY_TOT
+    style_row(ws3, r3, ncols3, font=party_tot_font, fill=PatternFill('solid', fgColor=dem_solid))
+    r3 += 1
+    ws3.cell(row=r3, column=1, value="REPUBLICAN TOTAL SPEND")
+    ws3.cell(row=r3, column=2, value=rep_total).number_format = MONEY_TOT
+    style_row(ws3, r3, ncols3, font=party_tot_font, fill=PatternFill('solid', fgColor=rep_solid))
+    r3 += 1
+    ws3.cell(row=r3, column=1, value="DELTA (DEMOCRAT − REPUBLICAN)")
+    ws3.cell(row=r3, column=2, value=delta_total).number_format = MONEY_TOT
+    style_row(ws3, r3, ncols3, font=grand_tot_font, fill=PatternFill('solid', fgColor=NAVY), border=BORDER_GRAND)
+    r3 += 2
+
+    ws3.cell(row=r3, column=1, value="WEEK").font = hdr_font
+    ws3.cell(row=r3, column=2, value="DEMOCRAT").font = hdr_font
+    ws3.cell(row=r3, column=3, value="REPUBLICAN").font = hdr_font
+    ws3.cell(row=r3, column=4, value="DELTA (D − R)").font = hdr_font
+    style_row(ws3, r3, ncols3, fill=hdr_fill)
+    r3 += 1
+    first_data_row = r3
+    for wk in weeks:
+        d = dem_weekly.get(wk, 0.0)
+        rep = rep_weekly.get(wk, 0.0)
+        ws3.cell(row=r3, column=1, value=wk.strftime('%m/%d/%Y')).font = cell_font
+        dcell = ws3.cell(row=r3, column=2, value=d); dcell.number_format = MONEY; dcell.font = cell_font
+        rcell = ws3.cell(row=r3, column=3, value=rep); rcell.number_format = MONEY; rcell.font = cell_font
+        delcell = ws3.cell(row=r3, column=4, value=d - rep); delcell.number_format = MONEY; delcell.font = cell_font
+        r3 += 1
+    last_data_row = r3 - 1
+    r3 += 1
+
+    ws3.conditional_formatting.add(
+        f"D{first_data_row}:D{last_data_row}",
+        ColorScaleRule(start_type='min', start_color=rep_solid,
+                       mid_type='num', mid_value=0, mid_color='FFFFFF',
+                       end_type='max', end_color=dem_solid)
+    )
+
+    ws3.column_dimensions['A'].width = 14
+    ws3.column_dimensions['B'].width = 14
+    ws3.column_dimensions['C'].width = 14
+    ws3.column_dimensions['D'].width = 14
+    ws3.freeze_panes = f"A{first_data_row}"
+
+    ws3.cell(row=r3, column=1,
+             value=f"Non-Partisan advertisers (${np_total:,.0f} total) are excluded from this Democrat-vs-Republican comparison.").font = note_font
+    ws3.merge_cells(start_row=r3, start_column=1, end_row=r3, end_column=ncols3)
+    r3 += 2
+
+    add_footer(ws3, r3, ncols3)
+
+
+def build(data_dir, title, output_path, today, include_dvr_tab):
+    rows1 = json.load(open(os.path.join(data_dir, "raw_creative_clean.json")))
+    rows2 = json.load(open(os.path.join(data_dir, "daily_spend_clean.json")))
+
+    for r in rows1:
+        r['spend'] = float(r['spend'])
+        r['first_ran'] = datetime.date.fromisoformat(r['first_ran'])
+        r['last_ran'] = datetime.date.fromisoformat(r['last_ran'])
+    for r in rows2:
+        r['spend'] = float(r['spend'])
+        r['target_date'] = datetime.date.fromisoformat(r['target_date'])
+
+    all_dates = [r['target_date'] for r in rows2] + [r['first_ran'] for r in rows1] + [r['last_ran'] for r in rows1]
+    weeks = weeks_covering(all_dates, today)
+
+    wb = Workbook()
+    wb.remove(wb.active)  # tab builders each create their own sheet
+
+    add_competitive_report_tab(wb, "Competitive Digital Report", title, weeks, rows2)
+    add_creative_timeline_tab(wb, "Creative Timeline", weeks, rows1, rows2)
+
     if include_dvr_tab:
-        ws3 = wb.create_sheet("D vs R")
-        ws3.sheet_view.showGridLines = False
-        ws3.row_dimensions[1].height = BANNER_ROW1_PT
-        ws3.row_dimensions[2].height = BANNER_ROW2_PT
-        ncols3 = 4  # WEEK, DEMOCRAT, REPUBLICAN, DELTA
-
-        ws3.merge_cells(start_row=1, start_column=1, end_row=2, end_column=ncols3)
-        tcell3 = ws3.cell(row=1, column=1, value="  D VS R")
-        tcell3.font = title_font
-        tcell3.alignment = Alignment(horizontal='right', vertical='center')
-        style_row(ws3, 1, ncols3, fill=hdr_fill)
-        style_row(ws3, 2, ncols3, fill=hdr_fill)
-        add_logo(ws3)
-
-        dem_weekly = defaultdict(float)
-        rep_weekly = defaultdict(float)
-        for a in advertisers_ordered:
-            p = adv_party.get(a, '')
-            if p not in ('D', 'R'):
-                continue
-            target = dem_weekly if p == 'D' else rep_weekly
-            for plat in platforms_by_adv[a]:
-                for wk, v in weekly[(a, plat)].items():
-                    target[wk] += v
-
-        dem_total = sum(dem_weekly.values())
-        rep_total = sum(rep_weekly.values())
-        np_total = party_total_spend.get('NP', 0.0)
-        delta_total = dem_total - rep_total
-        dem_solid, rep_solid = PARTY_SOLID['D'], PARTY_SOLID['R']
-
-        r3 = 4
-        ws3.cell(row=r3, column=1, value="DEMOCRAT TOTAL SPEND")
-        ws3.cell(row=r3, column=2, value=dem_total).number_format = MONEY_TOT
-        style_row(ws3, r3, ncols3, font=party_tot_font, fill=PatternFill('solid', fgColor=dem_solid))
-        r3 += 1
-        ws3.cell(row=r3, column=1, value="REPUBLICAN TOTAL SPEND")
-        ws3.cell(row=r3, column=2, value=rep_total).number_format = MONEY_TOT
-        style_row(ws3, r3, ncols3, font=party_tot_font, fill=PatternFill('solid', fgColor=rep_solid))
-        r3 += 1
-        ws3.cell(row=r3, column=1, value="DELTA (DEMOCRAT − REPUBLICAN)")
-        ws3.cell(row=r3, column=2, value=delta_total).number_format = MONEY_TOT
-        style_row(ws3, r3, ncols3, font=grand_tot_font, fill=PatternFill('solid', fgColor=NAVY), border=BORDER_GRAND)
-        r3 += 2
-
-        ws3.cell(row=r3, column=1, value="WEEK").font = hdr_font
-        ws3.cell(row=r3, column=2, value="DEMOCRAT").font = hdr_font
-        ws3.cell(row=r3, column=3, value="REPUBLICAN").font = hdr_font
-        ws3.cell(row=r3, column=4, value="DELTA (D − R)").font = hdr_font
-        style_row(ws3, r3, ncols3, fill=hdr_fill)
-        r3 += 1
-        first_data_row = r3
-        for wk in weeks:
-            d = dem_weekly.get(wk, 0.0)
-            rep = rep_weekly.get(wk, 0.0)
-            ws3.cell(row=r3, column=1, value=wk.strftime('%m/%d/%Y')).font = cell_font
-            dcell = ws3.cell(row=r3, column=2, value=d); dcell.number_format = MONEY; dcell.font = cell_font
-            rcell = ws3.cell(row=r3, column=3, value=rep); rcell.number_format = MONEY; rcell.font = cell_font
-            delcell = ws3.cell(row=r3, column=4, value=d - rep); delcell.number_format = MONEY; delcell.font = cell_font
-            r3 += 1
-        last_data_row = r3 - 1
-        r3 += 1
-
-        ws3.conditional_formatting.add(
-            f"D{first_data_row}:D{last_data_row}",
-            ColorScaleRule(start_type='min', start_color=rep_solid,
-                           mid_type='num', mid_value=0, mid_color='FFFFFF',
-                           end_type='max', end_color=dem_solid)
-        )
-
-        ws3.column_dimensions['A'].width = 14
-        ws3.column_dimensions['B'].width = 14
-        ws3.column_dimensions['C'].width = 14
-        ws3.column_dimensions['D'].width = 14
-        ws3.freeze_panes = f"A{first_data_row}"
-
-        ws3.cell(row=r3, column=1,
-                 value=f"Non-Partisan advertisers (${np_total:,.0f} total) are excluded from this Democrat-vs-Republican comparison.").font = note_font
-        ws3.merge_cells(start_row=r3, start_column=1, end_row=r3, end_column=ncols3)
-        r3 += 2
-
-        add_footer(ws3, r3, ncols3, footer_font)
+        _, _, _, party_total_spend = _advertiser_order(rows2)
+        add_dvr_tab(wb, weeks, rows2, party_total_spend)
 
     wb.save(output_path)
     return output_path
