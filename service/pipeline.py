@@ -8,6 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scripts.build_report import build  # noqa: E402
+from scripts.build_multi_district_report import build_multi_district  # noqa: E402
 
 REQUIRED_SPEND_FIELDS = ["spend", "sentiment", "language", "updated_at"]
 
@@ -59,6 +60,14 @@ def latest_updated_at(spend_rows):
     when it was actually written."""
     stamps = [r["updated_at"] for r in spend_rows if r.get("updated_at")]
     return max(stamps) if stamps else None
+
+
+def _is_multi_district(creative_rows, spend_rows):
+    """A source sheet is a multi-district/multi-race rollup (one coalition
+    tracking many state house/senate districts in a single sheet) rather
+    than a single race if its rows carry an `election` code at all --
+    single-race sheets don't have that column."""
+    return any(r.get("election") for r in creative_rows) or any(r.get("election") for r in spend_rows)
 
 
 def _has_two_party_race(spend_rows):
@@ -155,12 +164,15 @@ def generate_report(drive_client, file_id, file_name=None, creative_rows=None, s
         raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
 
     title = derive_title(file_name)
-    include_dvr = _has_two_party_race(spend_clean)
 
     tmpdir = tempfile.mkdtemp(prefix="digicomp_")
     json.dump(creative_clean, open(os.path.join(tmpdir, "raw_creative_clean.json"), "w"))
     json.dump(spend_clean, open(os.path.join(tmpdir, "daily_spend_clean.json"), "w"))
 
     output_path = os.path.join(tmpdir, f"{title.replace(' ', '_')}_Digital_Competitive_Report.xlsx")
-    build(tmpdir, title, output_path, datetime.date.today(), include_dvr)
+    if _is_multi_district(creative_clean, spend_clean):
+        build_multi_district(tmpdir, title, output_path, datetime.date.today())
+    else:
+        include_dvr = _has_two_party_race(spend_clean)
+        build(tmpdir, title, output_path, datetime.date.today(), include_dvr)
     return output_path, title
