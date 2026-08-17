@@ -54,8 +54,25 @@ class DriveClient:
         self.drive = build_google_client("drive", "v3", credentials=creds)
         self.sheets = build_google_client("sheets", "v4", credentials=creds)
 
-    def list_source_files(self, folder_id):
-        """Every Google Sheet directly inside the source folder, including
+    def list_source_files(self, folder_ids):
+        """Every Google Sheet across one or more source folders. folder_ids
+        is a single Drive folder id, or several comma-separated (e.g.
+        DRIVE_FOLDER_ID="folder1,folder2") -- lets the bot watch more than
+        one folder (say, single-race sheets in one and multi-district
+        rollups in another) without having to merge them in Drive itself.
+        Results are de-duplicated by resolved file id in case the same
+        sheet is reachable from more than one folder."""
+        ids = [f.strip() for f in folder_ids.split(",") if f.strip()]
+        seen, merged = set(), []
+        for folder_id in ids:
+            for f in self._list_source_files_one(folder_id):
+                if f["id"] not in seen:
+                    seen.add(f["id"])
+                    merged.append(f)
+        return merged
+
+    def _list_source_files_one(self, folder_id):
+        """Every Google Sheet directly inside one source folder, including
         shortcuts to sheets that live elsewhere (resolved to the real
         target's id, since that's what actually needs reading)."""
         query = (
