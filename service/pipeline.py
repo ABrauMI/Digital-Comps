@@ -64,10 +64,14 @@ def latest_updated_at(spend_rows):
 
 def _is_multi_district(creative_rows, spend_rows):
     """A source sheet is a multi-district/multi-race rollup (one coalition
-    tracking many state house/senate districts in a single sheet) rather
-    than a single race if its rows carry an `election` code at all --
-    single-race sheets don't have that column."""
-    return any(r.get("election") for r in creative_rows) or any(r.get("election") for r in spend_rows)
+    tracking many state house/senate districts in a single sheet) if its
+    rows carry more than one distinct `election` code. Ad Hawk now tags
+    every export with `election`/`election_type` columns, even single-race
+    ones (they just get one repeated value), so presence alone isn't
+    enough to tell the two apart."""
+    elections = {r.get("election") for r in creative_rows if r.get("election")}
+    elections |= {r.get("election") for r in spend_rows if r.get("election")}
+    return len(elections) > 1
 
 
 def _has_two_party_race(spend_rows):
