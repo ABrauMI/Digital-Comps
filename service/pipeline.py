@@ -141,6 +141,36 @@ def _excluded_advertisers_for(file_name):
     return excluded
 
 
+def _race_excluded_platforms():
+    """Per-race platform exclusions -- e.g. a client who doesn't want CTV
+    spend counted in one race's report. Configured via
+    RACE_EXCLUDED_PLATFORMS as comma-separated
+    'race substring:platform1|platform2' groups, e.g. 'PA-07:CTV'. Race
+    matching is a case-insensitive substring against the source file's
+    name; platform matching is an exact (case-insensitive) match against
+    the source_platform column, not a substring."""
+    raw = os.environ.get("RACE_EXCLUDED_PLATFORMS", "")
+    rules = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        race_substr, platforms = part.split(":", 1)
+        names = {p.strip().lower() for p in platforms.split("|") if p.strip()}
+        if names:
+            rules.append((race_substr.strip().lower(), names))
+    return rules
+
+
+def _excluded_platforms_for(file_name):
+    name_lower = file_name.lower()
+    excluded = set()
+    for race_substr, platform_names in _race_excluded_platforms():
+        if race_substr in name_lower:
+            excluded |= platform_names
+    return excluded
+
+
 def generate_report(drive_client, file_id, file_name=None, creative_rows=None, spend_rows=None):
     """Pulls the sheet (unless rows are already provided -- e.g. the caller
     just read them to check updated_at, no need to fetch twice), builds the
@@ -163,6 +193,11 @@ def generate_report(drive_client, file_id, file_name=None, creative_rows=None, s
     if excluded_advs:
         creative_clean = [r for r in creative_clean if r["advertiser"].strip().lower() not in excluded_advs]
         spend_clean = [r for r in spend_clean if r["advertiser"].strip().lower() not in excluded_advs]
+
+    excluded_platforms = _excluded_platforms_for(file_name)
+    if excluded_platforms:
+        creative_clean = [r for r in creative_clean if r["source_platform"].strip().lower() not in excluded_platforms]
+        spend_clean = [r for r in spend_clean if r["source_platform"].strip().lower() not in excluded_platforms]
 
     if not creative_clean and not spend_clean:
         raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
