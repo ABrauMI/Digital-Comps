@@ -185,19 +185,30 @@ def generate_report(drive_client, file_id, file_name=None, creative_rows=None, s
     spend_clean = _clean_spend_rows(spend_rows)
 
     floor_str = _date_floor_for(file_name)
+    print(f"[{file_name}] RACE_DATE_FLOORS match: {floor_str!r} "
+          f"(raw env: {os.environ.get('RACE_DATE_FLOORS', '')!r})")
     if floor_str:
+        before_c, before_s = len(creative_clean), len(spend_clean)
         creative_clean = [r for r in creative_clean if r["first_ran"] >= floor_str]
         spend_clean = [r for r in spend_clean if r["target_date"] >= floor_str]
+        print(f"[{file_name}] date floor {floor_str}: creative rows {before_c} -> {len(creative_clean)}, "
+              f"spend rows {before_s} -> {len(spend_clean)}")
 
     excluded_advs = _excluded_advertisers_for(file_name)
     if excluded_advs:
+        before_c, before_s = len(creative_clean), len(spend_clean)
         creative_clean = [r for r in creative_clean if r["advertiser"].strip().lower() not in excluded_advs]
         spend_clean = [r for r in spend_clean if r["advertiser"].strip().lower() not in excluded_advs]
+        print(f"[{file_name}] excluded advertisers {sorted(excluded_advs)}: "
+              f"creative rows {before_c} -> {len(creative_clean)}, spend rows {before_s} -> {len(spend_clean)}")
 
     excluded_platforms = _excluded_platforms_for(file_name)
     if excluded_platforms:
+        before_c, before_s = len(creative_clean), len(spend_clean)
         creative_clean = [r for r in creative_clean if r["source_platform"].strip().lower() not in excluded_platforms]
         spend_clean = [r for r in spend_clean if r["source_platform"].strip().lower() not in excluded_platforms]
+        print(f"[{file_name}] excluded platforms {sorted(excluded_platforms)}: "
+              f"creative rows {before_c} -> {len(creative_clean)}, spend rows {before_s} -> {len(spend_clean)}")
 
     if not creative_clean and not spend_clean:
         raise NoDataError(f"'{file_name}' has no usable data rows yet -- nothing to report.")
